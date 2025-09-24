@@ -1,0 +1,30 @@
+
+services:
+  - type: web
+    name: kouam-bot-deploy299999
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:10000 main:app --workers 1 --timeout 120 --log-level info
+    envVars:
+      - key: BOT_TOKEN
+        value: "7644537698:AAFjBt4dBfCB5YH4hxaPXV1bIXlNyIAQwjc"
+        sync: false
+      - key: WEBHOOK_URL
+        generateValue: true
+        sync: false
+      - key: PORT
+        value: "10000"
+      - key: DEBUG
+        value: "false"
+      - key: RENDER
+        value: "true"
+      - key: RENDER_SERVICE_NAME
+        value: "kouam-bot-deploy299999"
+    healthCheckPath: /health
+    autoDeploy: true
+    buildFilter:
+      paths:
+        - "**/*"
+    regions:
+      - oregon
