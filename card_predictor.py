@@ -341,38 +341,95 @@ class CardPredictor:
                 del self.temporary_messages[game_number]
                 logger.info(f"🔮 Jeu {game_number}: Retiré des messages temporaires")
 
-        # Si le message a encore des indicateurs d'attente, ne pas traiter
+        # If the message still has waiting indicators, don't process
         elif self.has_pending_indicators(message):
             logger.info(f"🔮 Jeu {game_number}: Encore des indicateurs d'attente, pas de prédiction")
             return False, None, None
 
-        # VÉRIFIER LE COOLDOWN AVANT TOUTE PRÉDICTION
+        # CHECK COOLDOWN BEFORE ANY PREDICTION
         if not self.can_make_prediction():
             logger.info(f"🔮 COOLDOWN - Jeu {game_number}: Attente cooldown de {self.prediction_cooldown}s, prédiction différée")
             return False, None, None
 
-        # NOUVELLE RÈGLE DU MIROIR: Analyser toutes les couleurs dans le message
+        # NEW MIRROR RULE: Analyze all colors in the message
         mirror_prediction = self.check_mirror_rule(message)
         if mirror_prediction:
             predicted_costume = mirror_prediction
-            logger.info(f"🔮 RÈGLE MIROIR APPLIQUÉE: → Prédire {predicted_costume}")
+            logger.info(f"🔮 MIRROR RULE APPLIED: → Predict {predicted_costume}")
         else:
-            logger.info(f"🔮 RÈGLE MIROIR - Jeu {game_number}: Pas assez de couleurs identiques (besoin de 3+)")
+            logger.info(f"🔮 MIRROR RULE - Game {game_number}: Not enough identical colors (need 3+)")
             return False, None, None
+
+        # NEW EXCLUSION: Check if there are 3 identical cards in a parenthesis
+        pattern = r'\(([^)]+)\)'
+        matches = re.findall(pattern, message) # Use original message for finding parentheses
+
+        for i, parenthese_content in enumerate(matches):
+            # Also normalize ❤️ in this parenthesis
+            normalized_parenthese = parenthese_content.replace("❤️", "♥️")
+
+            # Count costumes in this parenthesis
+            costume_counts = {
+                "♥️": normalized_parenthese.count("♥️"),
+                "♠️": normalized_parenthese.count("♠️"),
+                "♦️": normalized_parenthese.count("♦️"),
+                "♣️": normalized_parenthese.count("♣️")
+            }
+
+            # Check if any color appears 3 or more times in this parenthesis
+            for costume, count in costume_counts.items():
+                if count >= 3:
+                    logger.info(f"🔮 EQUALITY EXCLUSION - Parenthesis {i+1}: {count}x{costume} detected, no prediction")
+                    logger.info(f"🔮 EXCLUSION - Content: {normalized_parenthese}")
+                    return False, None, None
+
+        # NOUVELLE EXCLUSION COMBINÉE CLARIFIÉE: Vérifier qu'UNE SEULE couleur a 3+ occurrences
+        if len(matches) >= 2:
+            # Combiner le contenu des deux premières parenthèses
+            combined_content = matches[0] + matches[1]
+            normalized_combined = combined_content.replace("❤️", "♥️")
+
+            # Compter les costumes dans les deux parenthèses combinées
+            combined_costume_counts = {
+                "♥️": normalized_combined.count("♥️"),
+                "♠️": normalized_combined.count("♠️"),
+                "♦️": normalized_combined.count("♦️"),
+                "♣️": normalized_combined.count("♣️")
+            }
+
+            # Compter combien de couleurs différentes ont 3+ occurrences
+            costumes_with_3_plus = []
+            for costume, count in combined_costume_counts.items():
+                if count >= 3:
+                    costumes_with_3_plus.append(f"{count}x{costume}")
+
+            # Si 2 ou plus de couleurs différentes ont chacune 3+ occurrences → EXCLUSION
+            if len(costumes_with_3_plus) >= 2:
+                logger.info(f"🔮 EXCLUSION MULTIPLE - {len(costumes_with_3_plus)} couleurs avec 3+ occurrences: {costumes_with_3_plus}")
+                logger.info(f"🔮 EXCLUSION - Parenthèse 1: {matches[0]}")
+                logger.info(f"🔮 EXCLUSION - Parenthèse 2: {matches[1]}")
+                return False, None, None
+
+            # Si AUCUNE couleur n'a 3+ occurrences → EXCLUSION (pas assez pour règle miroir)
+            if len(costumes_with_3_plus) == 0:
+                logger.info(f"🔮 EXCLUSION MIROIR - Aucune couleur n'a 3+ occurrences combinées")
+                logger.info(f"🔮 EXCLUSION - Comptage combiné: {combined_costume_counts}")
+                return False, None, None
+
 
         if predicted_costume:
             # Prevent duplicate processing
             message_hash = hash(message)
             if message_hash not in self.processed_messages:
                 self.processed_messages.add(message_hash)
-                # Mettre à jour le timestamp de la dernière prédiction et sauvegarder
+                # Update last prediction timestamp and save
                 self.last_prediction_time = time.time()
                 self._save_last_prediction_time()
-                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: GÉNÉRATION prédiction pour jeu {target_game} avec costume {predicted_costume}")
-                logger.info(f"⏰ COOLDOWN - Prochaine prédiction possible dans {self.prediction_cooldown}s")
+                logger.info(f"🔮 PREDICTION - Game {game_number}: GENERATING prediction for game {target_game} with costume {predicted_costume}")
+                logger.info(f"⏰ COOLDOWN - Next prediction possible in {self.prediction_cooldown}s")
                 return True, game_number, predicted_costume
             else:
-                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: ⚠️ Déjà traité")
+                logger.info(f"🔮 PREDICTION - Game {game_number}: ⚠️ Already processed")
                 return False, None, None
 
         return False, None, None
@@ -381,7 +438,7 @@ class CardPredictor:
         """Make a prediction for game +1 with the predicted costume"""
         target_game = game_number + 1
 
-        # Format de message de prédiction simplifié
+        # Simplified prediction message format
         prediction_text = f"🔵{target_game}🔵:{predicted_costume}statut :⏳"
 
         # Store the prediction for later verification
@@ -487,11 +544,12 @@ class CardPredictor:
 
         logger.info(f"🔍 VÉRIFICATION CORRIGÉE - Jeu {game_number} (édité: {is_edited})")
 
+        # ✅ CORRECTION APPLIQUÉE - RECONNAÎT ✅ ET 🔰 ✅
         # SYSTÈME DE VÉRIFICATION: Sur messages édités OU normaux avec symbole succès
         has_success_symbol = self.has_completion_indicators(message)
-if not has_success_symbol:
-    logger.info(f"🔍 ⏸️ Pas de vérification - Aucun symbole de succès (✅ ou 🔰) trouvé") 
-    return None
+        if not has_success_symbol:
+            logger.info(f"🔍 ⏸️ Pas de vérification - Aucun symbole de succès (✅ ou 🔰) trouvé")
+            return None
 
         logger.info(f"🔍 📊 ÉTAT ACTUEL - Prédictions stockées: {list(self.predictions.keys())}")
         logger.info(f"🔍 📊 ÉTAT ACTUEL - Messages envoyés: {list(self.sent_predictions.keys())}")
@@ -526,53 +584,56 @@ if not has_success_symbol:
                 costume_found = self.check_costume_in_first_parentheses(message, predicted_costume)
 
                 if costume_found:
-                    # SUCCÈS à décalage +0 ou +1
-                    status_symbol = f"✅{verification_offset}️⃣"
-                    original_message = f"🔵{predicted_game}🔵:{predicted_costume}statut :⏳"
-                    updated_message = f"🔵{predicted_game}🔵:{predicted_costume}statut :{status_symbol}"
+                    # SUCCÈS IMMÉDIAT
+                    prediction['status'] = 'verified_success'
+                    prediction['verification_game'] = game_number
+                    prediction['verification_offset'] = verification_offset
 
-                    # Marquer comme traité IMMÉDIATEMENT
-                    prediction['status'] = 'correct'
-                    prediction['verification_count'] = verification_offset
-                    prediction['final_message'] = updated_message
-
-                    logger.info(f"🔍 ⚡ SUCCÈS DÉCALAGE +{verification_offset} - Costume {predicted_costume} détecté")
-                    logger.info(f"🔍 🛑 ARRÊT IMMÉDIAT - Vérification terminée: {status_symbol}")
-                    logger.info(f"🔍 📝 ÉDITION MESSAGE - '{original_message}' → '{updated_message}'")
-
-                    return {
-                        'type': 'edit_message',
+                    result = {
                         'predicted_game': predicted_game,
-                        'new_message': updated_message,
-                        'original_message': original_message
+                        'verification_game': game_number,
+                        'predicted_costume': predicted_costume,
+                        'status': 'success',
+                        'offset': verification_offset,
+                        'is_edited': is_edited
                     }
-                else:
-                    # ÉCHEC - Costume non trouvé au décalage +0 ou +1
-                    logger.info(f"🔍 ❌ ÉCHEC DÉCALAGE +{verification_offset} - Costume {predicted_costume} non trouvé")
-                    # Continuer à vérifier le prochain décalage (si applicable)
-                    continue
 
-            # ÉCHEC APRÈS +2 (quand décalage >= 2)
+                    success_symbol = f"✅{verification_offset}️⃣"
+                    logger.info(f"🔍 ✅ SUCCÈS IMMÉDIAT - Prédiction {predicted_game} validée au jeu {game_number} ({success_symbol})")
+                    return result
+
+            # ÉCHEC SI DÉCALAGE >= +2
             elif verification_offset >= 2:
-                predicted_costume = prediction.get('predicted_costume', '')
-                original_message = f"🔵{predicted_game}🔵:{predicted_costume}statut :⏳"
-                updated_message = f"🔵{predicted_game}🔵:{predicted_costume}statut :⭕"
+                prediction['status'] = 'verified_failed'
+                prediction['verification_game'] = game_number
+                prediction['verification_offset'] = verification_offset
 
-                # Marquer comme échec APRÈS +2
-                prediction['status'] = 'failed'
-                prediction['final_message'] = updated_message
-
-                logger.info(f"🔍 ❌ ÉCHEC APRÈS +2 - Décalage {verification_offset} ≥ 2")
-                logger.info(f"🔍 🛑 ARRÊT ÉCHEC - Prédiction {predicted_game} marquée: ⭕")
-                return {
-                    'type': 'edit_message',
+                result = {
                     'predicted_game': predicted_game,
-                    'new_message': updated_message,
-                    'original_message': original_message
+                    'verification_game': game_number,
+                    'predicted_costume': prediction.get('predicted_costume'),
+                    'status': 'failed',
+                    'offset': verification_offset,
+                    'is_edited': is_edited
                 }
 
-        logger.info(f"🔍 ✅ VÉRIFICATION TERMINÉE - Aucune prédiction éligible pour le jeu {game_number}")
+                logger.info(f"🔍 ❌ ÉCHEC CONFIRMÉ - Prédiction {predicted_game} échouée au jeu {game_number} (📍⭕)")
+                return result
+
+        logger.info(f"🔍 🔄 VÉRIFICATION EN COURS - Aucune prédiction éligible trouvée pour le jeu {game_number}")
         return None
 
-# Global instance
+    def set_prediction_cooldown(self, seconds: int):
+        """Set the cooldown period between predictions"""
+        if seconds < 10:
+            seconds = 10
+            logger.warning("Cooldown minimum fixé à 10 secondes")
+        elif seconds > 600:
+            seconds = 600
+            logger.warning("Cooldown maximum fixé à 600 secondes")
+        
+        self.prediction_cooldown = seconds
+        logger.info(f"🎯 Cooldown de prédiction mis à jour : {seconds} secondes")
+
+# Instance globale pour utilisation dans les handlers
 card_predictor = CardPredictor()
