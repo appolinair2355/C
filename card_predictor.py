@@ -488,10 +488,10 @@ class CardPredictor:
         logger.info(f"🔍 VÉRIFICATION CORRIGÉE - Jeu {game_number} (édité: {is_edited})")
 
         # SYSTÈME DE VÉRIFICATION: Sur messages édités OU normaux avec symbole succès
-        has_success_symbol = '✅' in message
-        if not has_success_symbol:
-            logger.info(f"🔍 ⏸️ Pas de vérification - Aucun symbole de succès (✅) trouvé")
-            return None
+        has_success_symbol = self.has_completion_indicators(message)
+if not has_success_symbol:
+    logger.info(f"🔍 ⏸️ Pas de vérification - Aucun symbole de succès (✅ ou 🔰) trouvé") 
+    return None
 
         logger.info(f"🔍 📊 ÉTAT ACTUEL - Prédictions stockées: {list(self.predictions.keys())}")
         logger.info(f"🔍 📊 ÉTAT ACTUEL - Messages envoyés: {list(self.sent_predictions.keys())}")
