@@ -1,17 +1,26 @@
-
 """
 Card prediction logic for Joker's Telegram Bot - webhook deployment
+Modifications:
+- 🔰 considered as ✅ (final)
+- Predictions created for N+2
+- Store message_id when sending predictions and edit that message when status changes:
+    - Found at N+2 -> ✅0️⃣
+    - Not found at N+2 but found at N+3 -> ✅1️⃣
+    - Not found at N+2 nor N+3 -> ⭕
+- Functions added: get_prediction_text, send_prediction_via_bot, edit_prediction_message, process_incoming_telegram_message
+- Keeps cooldown persistence in .last_prediction_time
 """
 
 import re
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict, List, Tuple
 import time
 import os
 import json
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # Configuration constants
 VALID_CARD_COMBINATIONS = [
@@ -20,19 +29,32 @@ VALID_CARD_COMBINATIONS = [
 
 CARD_SYMBOLS = ["♠️", "♥️", "♦️", "♣️", "❤️"]  # Include both ♥️ and ❤️ variants
 
-# Target channel ID for Baccarat Kouamé
+# Channel IDs (example provided)
 TARGET_CHANNEL_ID = -1002682552255
-
-# Target channel ID for predictions and updates
 PREDICTION_CHANNEL_ID = -1002646551216
+
+# Persistence filename
+LAST_PREDICTION_FILENAME = ".last_prediction_time"
+
+
+def normalize_emoji(text: str) -> str:
+    """Normalize emoji variants (e.g. ❤️ -> ♥️)."""
+    return text.replace("❤️", "♥️")
+
+
+def extract_parentheses_sections(text: str) -> List[str]:
+    """Return list of contents inside parentheses, in order."""
+    pattern = r'\(([^)]+)\)'
+    return re.findall(pattern, text)
+
 
 class CardPredictor:
     """Handles card prediction logic for webhook deployment"""
 
     def __init__(self):
-        self.predictions = {}  # Store predictions for verification
+        self.predictions: Dict[int, Dict] = {}  # keyed by target_game (int)
         self.processed_messages = set()  # Avoid duplicate processing
-        self.sent_predictions = {}  # Store sent prediction messages for editing
+        self.sent_predictions = {}  # store message metadata if needed
         self.temporary_messages = {}  # Store temporary messages waiting for final edit
         self.pending_edits = {}  # Store messages waiting for edit with indicators
         self.position_preference = 1  # Default position preference (1 = first card, 2 = second card)
@@ -40,26 +62,32 @@ class CardPredictor:
         self.last_prediction_time = self._load_last_prediction_time()  # Load persisted timestamp
         self.prediction_cooldown = 30   # Cooldown period in seconds between predictions
 
+    # -------------------------
+    # Persistence (cooldown)
+    # -------------------------
     def _load_last_prediction_time(self) -> float:
         """Load last prediction timestamp from file"""
         try:
-            if os.path.exists('.last_prediction_time'):
-                with open('.last_prediction_time', 'r') as f:
+            if os.path.exists(LAST_PREDICTION_FILENAME):
+                with open(LAST_PREDICTION_FILENAME, 'r') as f:
                     timestamp = float(f.read().strip())
                     logger.info(f"⏰ PERSISTANCE - Dernière prédiction chargée: {time.time() - timestamp:.1f}s écoulées")
                     return timestamp
         except Exception as e:
             logger.warning(f"⚠️ Impossible de charger le timestamp: {e}")
-        return 0
+        return 0.0
 
     def _save_last_prediction_time(self):
         """Save last prediction timestamp to file"""
         try:
-            with open('.last_prediction_time', 'w') as f:
+            with open(LAST_PREDICTION_FILENAME, 'w') as f:
                 f.write(str(self.last_prediction_time))
         except Exception as e:
             logger.warning(f"⚠️ Impossible de sauvegarder le timestamp: {e}")
 
+    # -------------------------
+    # Configuration / utility
+    # -------------------------
     def reset_predictions(self):
         """Reset all prediction states - useful for recalibration"""
         self.predictions.clear()
@@ -67,7 +95,7 @@ class CardPredictor:
         self.sent_predictions.clear()
         self.temporary_messages.clear()
         self.pending_edits.clear()
-        self.last_prediction_time = 0
+        self.last_prediction_time = 0.0
         self._save_last_prediction_time()
         logger.info("🔄 Système de prédictions réinitialisé")
 
@@ -96,22 +124,23 @@ class CardPredictor:
         self.temporary_messages.clear()
         self.pending_edits.clear()
         self.redirect_channels.clear()
-        self.last_prediction_time = 0
+        self.last_prediction_time = 0.0
         self._save_last_prediction_time()
         logger.info("🔄 Toutes les prédictions et redirections ont été supprimées")
 
+    # -------------------------
+    # Extraction helpers
+    # -------------------------
     def extract_game_number(self, message: str) -> Optional[int]:
-        """Extract game number from message like #n744 or #N744"""
-        pattern = r'#[nN](\d+)'
+        """Extract game number from message like #n744 or #N744 or #744"""
+        pattern = r'#[nN]?(\d+)'
         match = re.search(pattern, message)
         if match:
-            return int(match.group(1))
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
         return None
-
-    def extract_cards_from_parentheses(self, message: str) -> List[str]:
-        """Extract cards from first and second parentheses"""
-        # This method is deprecated, use extract_card_symbols_from_parentheses instead
-        return []
 
     def has_pending_indicators(self, text: str) -> bool:
         """Check if message contains indicators suggesting it will be edited"""
@@ -119,8 +148,8 @@ class CardPredictor:
         return any(indicator in text for indicator in indicators)
 
     def has_completion_indicators(self, text: str) -> bool:
-        """Check if message contains completion indicators after edit"""
-        completion_indicators = ['✅', '🔰']
+        """Check if message contains completion indicators after edit (✅ or 🔰 treated as final)"""
+        completion_indicators = ['✅', '🔰']  # 🔰 is treated as final
         has_indicator = any(indicator in text for indicator in completion_indicators)
         if has_indicator:
             logger.info(f"🔍 FINALISATION DÉTECTÉE - Indicateurs trouvés dans: {text[:100]}...")
@@ -149,12 +178,12 @@ class CardPredictor:
             normalized_content = match.replace("❤️", "♥️")
 
             # Extract only unique card symbols (costumes) from this section
-            unique_symbols = set()
+            unique_symbols = []
             for symbol in ["♠️", "♥️", "♦️", "♣️"]:
                 if symbol in normalized_content:
-                    unique_symbols.add(symbol)
+                    unique_symbols.append(symbol)
 
-            all_sections.append(list(unique_symbols))
+            all_sections.append(unique_symbols)
 
         return all_sections
 
@@ -170,59 +199,16 @@ class CardPredictor:
         return any(emoji in message for emoji in temporary_emojis)
 
     def is_final_message(self, message: str) -> bool:
-        """Check if message contains final completion emojis"""
+        """Check if message contains final completion emojis (✅ or 🔰)"""
         final_emojis = ['✅', '🔰']
         is_final = any(emoji in message for emoji in final_emojis)
         if is_final:
             logger.info(f"🔍 MESSAGE FINAL DÉTECTÉ - Emoji final trouvé dans: {message[:100]}...")
         return is_final
 
-    def get_card_combination(self, cards: List[str]) -> Optional[str]:
-        """Get the combination of 3 different cards"""
-        unique_cards = list(set(cards))
-        if len(unique_cards) == 3:
-            combination = ''.join(sorted(unique_cards))
-            logger.info(f"Card combination found: {combination} from cards: {unique_cards}")
-
-            # Check if this combination matches any valid pattern
-            for valid_combo in VALID_CARD_COMBINATIONS:
-                if set(combination) == set(valid_combo):
-                    logger.info(f"Valid combination matched: {valid_combo}")
-                    return combination
-
-            # Accept any 3 different cards as valid
-            logger.info(f"Accepting 3 different cards as valid: {combination}")
-            return combination
-        return None
-
-    def extract_costumes_from_second_parentheses(self, message: str) -> List[str]:
-        """Extract only costumes from exactly 3 cards in the second parentheses"""
-        # Find all parentheses content
-        pattern = r'\(([^)]+)\)'
-        matches = re.findall(pattern, message)
-
-        if len(matches) < 2:
-            return []
-
-        second_parentheses = matches[1]  # Second parentheses (index 1)
-        logger.info(f"Deuxième parenthèses contenu: {second_parentheses}")
-
-        # Extract only costume symbols (♠️, ♥️, ♦️, ♣️, ❤️)
-        costumes = []
-        costume_symbols = ["♠️", "♥️", "♦️", "♣️", "❤️"]
-
-        # Normalize ❤️ to ♥️ for consistency
-        normalized_content = second_parentheses.replace("❤️", "♥️")
-
-        # Find all costume symbols in order of appearance
-        for char_pos in range(len(normalized_content) - 1):
-            two_char_symbol = normalized_content[char_pos:char_pos + 2]
-            if two_char_symbol in ["♠️", "♥️", "♦️", "♣️"]:
-                costumes.append(two_char_symbol)
-
-        logger.info(f"Costumes extraits de la deuxième parenthèse: {costumes}")
-        return costumes
-
+    # -------------------------
+    # Mirror rule
+    # -------------------------
     def check_mirror_rule(self, message: str) -> Optional[str]:
         """
         NOUVELLE RÈGLE DU MIROIR:
@@ -233,8 +219,7 @@ class CardPredictor:
         - ♦️ → ♠️
         - ♣️ → ♥️
         """
-        # Normaliser ❤️ vers ♥️ pour cohérence
-        normalized_message = message.replace("❤️", "♥️")
+        normalized_message = normalize_emoji(message)
 
         # Compter toutes les occurrences de chaque couleur dans le message entier
         color_counts = {
@@ -247,37 +232,29 @@ class CardPredictor:
         logger.info(f"🔮 MIROIR - Comptage couleurs: {color_counts}")
 
         # Trouver les couleurs qui ont 3 occurrences ou plus
-        for color, count in color_counts.items():
-            if count >= 3:
-                # Appliquer la règle du miroir
-                if color == "♥️":
-                    mirror = "♣️"
-                elif color == "♠️":
-                    mirror = "♦️"
-                elif color == "♦️":
-                    mirror = "♠️"
-                elif color == "♣️":
-                    mirror = "♥️"
-                else:
-                    continue
+        candidates = [c for c, cnt in color_counts.items() if cnt >= 3]
+        if len(candidates) != 1:
+            logger.info(f"🔮 MIROIR - Pas de majorité unique (candidates={candidates})")
+            return None
 
-                logger.info(f"🔮 MIROIR DÉTECTÉ - {count}x{color} → Prédire {mirror}")
-                return mirror
+        color = candidates[0]
+        mirror_map = {
+            "♥️": "♣️",
+            "♠️": "♦️",
+            "♦️": "♠️",
+            "♣️": "♥️"
+        }
+        mirror = mirror_map.get(color)
+        logger.info(f"🔮 MIROIR DÉTECTÉ - {color} ({color_counts[color]}x) → Prédire {mirror}")
+        return mirror
 
-        logger.info(f"🔮 MIROIR - Aucune couleur n'a 3+ occurrences")
-        return None
-
-    def check_same_costumes_rule(self, costumes: List[str]) -> Optional[str]:
-        """
-        ANCIENNE RÈGLE (maintenant désactivée) - Conservée pour compatibilité
-        """
-        return None
-
+    # -------------------------
+    # Cooldown
+    # -------------------------
     def can_make_prediction(self) -> bool:
-        """Check if enough time has passed since last prediction (70 seconds cooldown)"""
+        """Check if enough time has passed since last prediction"""
         current_time = time.time()
 
-        # Si aucune prédiction n'a été faite encore, autoriser
         if self.last_prediction_time == 0:
             logger.info(f"⏰ PREMIÈRE PRÉDICTION: Aucune prédiction précédente, autorisation accordée")
             return True
@@ -292,26 +269,24 @@ class CardPredictor:
             logger.info(f"⏰ COOLDOWN ACTIF: Encore {remaining:.1f}s à attendre avant prochaine prédiction")
             return False
 
+    # -------------------------
+    # Decision to predict
+    # -------------------------
     def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[str]]:
         """
-        NOUVELLES RÈGLES DE PRÉDICTION:
-        1. Exclure 🔰, #R, #X
-        2. Règle du MIROIR pour couleurs identiques multiples
-        3. Vérification du cooldown
+        Determine whether to create a prediction.
+        - Only finalized messages (✅ or 🔰) are considered here.
+        - #R and #X remain exclusions (you can remove them if you want).
         Returns: (should_predict, game_number, predicted_costume)
         """
-        # Extract game number
         game_number = self.extract_game_number(message)
         if not game_number:
             return False, None, None
 
         logger.debug(f"🔮 PRÉDICTION - Analyse du jeu {game_number}")
 
-        # EXCLUSIONS PRIORITAIRES
-        if '🔰' in message:
-            logger.info(f"🔮 EXCLUSION - Jeu {game_number}: Contient 🔰, pas de prédiction")
-            return False, None, None
-
+        # Remove '🔰' exclusion: treat it as final (handled by has_completion_indicators)
+        # EXCLUSIONS: keep #R and #X if present (they block predictions)
         if '#R' in message:
             logger.info(f"🔮 EXCLUSION - Jeu {game_number}: Contient #R, pas de prédiction")
             return False, None, None
@@ -320,259 +295,314 @@ class CardPredictor:
             logger.info(f"🔮 EXCLUSION - Jeu {game_number}: Contient #X (match nul), pas de prédiction")
             return False, None, None
 
-        # Check if this is a temporary message (should wait for final edit)
+        # If message is temporary and not yet final, wait
         if self.has_pending_indicators(message) and not self.has_completion_indicators(message):
             logger.info(f"🔮 Jeu {game_number}: Message temporaire (⏰▶🕐➡️), attente finalisation")
             self.temporary_messages[game_number] = message
             return False, None, None
 
-        # Skip if we already have a prediction for target game number (+1)
+        # Target game (prediction is stored and sent for base_game + 2)
         target_game = game_number + 2
-        if target_game in self.predictions and self.predictions[target_game].get('status') == 'pending':
+        if target_game in self.predictions and self.predictions[target_game].get('status') in ('pending', '⏳', 'waiting_next'):
             logger.info(f"🔮 Jeu {game_number}: Prédiction N{target_game} déjà existante, éviter doublon")
             return False, None, None
 
-        # Check if this is a final message (has completion indicators)
+        # If message is final, remove from temporary messages (if was stored)
         if self.has_completion_indicators(message):
-            logger.info(f"🔮 Jeu {game_number}: Message final détecté (✅ ou 🔰)")
-            # Remove from temporary if it was there
             if game_number in self.temporary_messages:
                 del self.temporary_messages[game_number]
                 logger.info(f"🔮 Jeu {game_number}: Retiré des messages temporaires")
 
-        # Si le message a encore des indicateurs d'attente, ne pas traiter
-        elif self.has_pending_indicators(message):
-            logger.info(f"🔮 Jeu {game_number}: Encore des indicateurs d'attente, pas de prédiction")
-            return False, None, None
-
-        # VÉRIFIER LE COOLDOWN AVANT TOUTE PRÉDICTION
+        # Check cooldown
         if not self.can_make_prediction():
-            logger.info(f"🔮 COOLDOWN - Jeu {game_number}: Attente cooldown de {self.prediction_cooldown}s, prédiction différée")
+            logger.info(f"🔮 COOLDOWN - Jeu {game_number}: Attente cooldown, prédiction différée")
             return False, None, None
 
-        # NOUVELLE RÈGLE DU MIROIR: Analyser toutes les couleurs dans le message
+        # Apply mirror rule
         mirror_prediction = self.check_mirror_rule(message)
-        if mirror_prediction:
-            predicted_costume = mirror_prediction
-            logger.info(f"🔮 RÈGLE MIROIR APPLIQUÉE: → Prédire {predicted_costume}")
-        else:
-            logger.info(f"🔮 RÈGLE MIROIR - Jeu {game_number}: Pas assez de couleurs identiques (besoin de 3+)")
+        if not mirror_prediction:
+            logger.info(f"🔮 RÈGLE MIROIR - Jeu {game_number}: Pas assez de couleurs identiques (besoin de 3+ ou majorité unique)")
             return False, None, None
 
-        if predicted_costume:
-            # Prevent duplicate processing
-            message_hash = hash(message)
-            if message_hash not in self.processed_messages:
-                self.processed_messages.add(message_hash)
-                # Mettre à jour le timestamp de la dernière prédiction et sauvegarder
-                self.last_prediction_time = time.time()
-                self._save_last_prediction_time()
-                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: GÉNÉRATION prédiction pour jeu {target_game} avec costume {predicted_costume}")
-                logger.info(f"⏰ COOLDOWN - Prochaine prédiction possible dans {self.prediction_cooldown}s")
-                return True, game_number, predicted_costume
-            else:
-                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: ⚠️ Déjà traité")
-                return False, None, None
+        # Check duplicates by message hash
+        message_hash = hash(message)
+        if message_hash in self.processed_messages:
+            logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: Message déjà traité (hash)")
+            return False, None, None
 
-        return False, None, None
+        # Mark processed and prepare prediction
+        self.processed_messages.add(message_hash)
+        # update last prediction time (will be saved on actual make_prediction)
+        logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: Préparée pour prédiction N{target_game} avec {mirror_prediction}")
+        return True, game_number, mirror_prediction
 
-    def make_prediction(self, game_number: int, predicted_costume: str) -> str:
-        """Make a prediction for game +1 with the predicted costume"""
-        target_game = game_number + 1
+    # -------------------------
+    # Make & send prediction (store message_id)
+    # -------------------------
+    def make_prediction(self, game_number: int, predicted_costume: str, sent_message_id: Optional[int] = None, sent_chat_id: Optional[int] = None) -> str:
+        """
+        Create a prediction record for target_game = game_number + 2.
+        If you already sent the message to Telegram, pass sent_message_id so we can edit later.
+        """
+        target_game = game_number + 2  # IMPORTANT: +2 per your requirement
 
-        # Format de message de prédiction simplifié
-        prediction_text = f"🔵{target_game}🔵:{predicted_costume}statut :⏳"
+        prediction_text = f"🔵{target_game}🔵:{predicted_costume} statut :⏳"
 
-        # Store the prediction for later verification
         self.predictions[target_game] = {
             'predicted_costume': predicted_costume,
-            'status': 'pending',
+            'status': '⏳',  # initial pending status
             'predicted_from': game_number,
             'verification_count': 0,
-            'message_text': prediction_text
+            'message_text': prediction_text,
+            'message_id': sent_message_id,
+            'chat_id': sent_chat_id,
+            'timestamp': time.time(),
+            'verified': False
         }
 
-        logger.info(f"Made prediction for game {target_game} based on costume {predicted_costume}")
+        # Update cooldown timestamp and persist
+        self.last_prediction_time = time.time()
+        self._save_last_prediction_time()
+
+        logger.info(f"Made prediction for game {target_game} based on costume {predicted_costume} (from {game_number})")
         return prediction_text
 
-    def get_costume_text(self, costume_emoji: str) -> str:
-        """Convert costume emoji to text representation"""
-        costume_map = {
-            "♠️": "pique",
-            "♥️": "coeur",
-            "♦️": "carreau",
-            "♣️": "trèfle"
-        }
-        return costume_map.get(costume_emoji, "inconnu")
+    def get_prediction_text(self, target_game: int) -> str:
+        """Rebuild prediction text according to current status."""
+        rec = self.predictions.get(target_game)
+        if not rec:
+            return ""
+        costume = rec['predicted_costume']
+        status = rec.get('status', '⏳')
+        # map to visible representation
+        visible = status
+        # ensure formatting is consistent (status already in desired emoji form)
+        return f"🔵{target_game}🔵:{costume} statut :{visible}"
 
-    def count_cards_in_winning_parentheses(self, message: str) -> int:
-        """Count the number of card symbols in the parentheses that has the ✅ symbol"""
-        # Split message at ✅ to find which section won
-        if '✅' not in message:
-            return 0
+    # -------------------------
+    # Telegram integration helpers (python-telegram-bot)
+    # -------------------------
+    def send_prediction_via_bot(self, bot, chat_id: int, target_game: int) -> Optional[int]:
+        """
+        Send prediction text to channel and store message_id for later edits.
+        bot: instance of telegram.Bot (python-telegram-bot v20.x)
+        chat_id: ID of chat/channel to send to
+        target_game: integer key of self.predictions
+        Returns message_id if sent, else None
+        """
+        rec = self.predictions.get(target_game)
+        if not rec:
+            logger.error(f"send_prediction_via_bot: no prediction record for {target_game}")
+            return None
+        text = rec.get('message_text') or self.get_prediction_text(target_game)
+        try:
+            sent = bot.send_message(chat_id=chat_id, text=text)
+            message_id = getattr(sent, 'message_id', None)
+            rec['message_id'] = message_id
+            rec['chat_id'] = chat_id
+            # save potentially updated message_text (in case of formatting)
+            rec['message_text'] = text
+            logger.info(f"✉️ Prediction sent to chat {chat_id} as message_id={message_id}")
+            return message_id
+        except Exception as e:
+            logger.exception(f"⚠️ Failed to send prediction to chat {chat_id}: {e}")
+            return None
 
-        # Find the parentheses after ✅
-        checkmark_pos = message.find('✅')
-        remaining_text = message[checkmark_pos:]
-
-        # Extract parentheses content after ✅
-        pattern = r'\(([^)]+)\)'
-        match = re.search(pattern, remaining_text)
-
-        if match:
-            winning_content = match.group(1)
-            # Normalize ❤️ to ♥️ for consistent counting
-            normalized_content = winning_content.replace("❤️", "♥️")
-            card_count = 0
-            for symbol in ["♠️", "♥️", "♦️", "♣️"]:
-                card_count += normalized_content.count(symbol)
-            logger.info(f"Found ✅ winning section: {winning_content}, card count: {card_count}")
-            return card_count
-
-        return 0
-
-    def count_cards_in_first_parentheses(self, message: str) -> int:
-        """Count the total number of card symbols in the first parentheses"""
-        # Find first parentheses content
-        pattern = r'\(([^)]+)\)'
-        match = re.search(pattern, message)
-
-        if match:
-            first_content = match.group(1)
-            # Normalize ❤️ to ♥️ for consistent counting
-            normalized_content = first_content.replace("❤️", "♥️")
-            card_count = 0
-            for symbol in ["♠️", "♥️", "♦️", "♣️"]:
-                card_count += normalized_content.count(symbol)
-            logger.info(f"Found first parentheses: {first_content}, card count: {card_count}")
-            return card_count
-
-        return 0
-
-    def verify_prediction(self, message: str) -> Optional[Dict]:
-        """Verify if a prediction was correct (regular messages)"""
-        return self._verify_prediction_common(message, is_edited=False)
-
-    def verify_prediction_from_edit(self, message: str) -> Optional[Dict]:
-        """Verify if a prediction was correct from edited message (enhanced verification)"""
-        return self._verify_prediction_common(message, is_edited=True)
-
-    def check_costume_in_first_parentheses(self, message: str, predicted_costume: str) -> bool:
-        """Vérifier si le costume prédit apparaît SEULEMENT dans le PREMIER parenthèses"""
-        # Normaliser ❤️ vers ♥️ pour cohérence
-        normalized_message = message.replace("❤️", "♥️")
-        normalized_costume = predicted_costume.replace("❤️", "♥️")
-
-        # Extraire SEULEMENT le contenu du PREMIER parenthèses
-        pattern = r'\(([^)]+)\)'
-        matches = re.findall(pattern, normalized_message)
-
-        if not matches:
-            logger.info(f"🔍 Aucun parenthèses trouvé dans le message")
+    def edit_prediction_message(self, bot, target_game: int) -> bool:
+        """
+        Edit the previously sent prediction message (replace status).
+        Returns True on success.
+        """
+        rec = self.predictions.get(target_game)
+        if not rec:
+            logger.error(f"edit_prediction_message: no prediction record for {target_game}")
+            return False
+        message_id = rec.get('message_id')
+        chat_id = rec.get('chat_id', PREDICTION_CHANNEL_ID)
+        new_text = self.get_prediction_text(target_game)
+        if not message_id:
+            logger.warning(f"No message_id stored for prediction {target_game}; cannot edit")
+            return False
+        try:
+            bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=new_text)
+            # update stored message_text
+            rec['message_text'] = new_text
+            logger.info(f"✏️ Edited prediction message {message_id} in chat {chat_id} for target {target_game}")
+            return True
+        except Exception as e:
+            logger.exception(f"⚠️ Failed to edit prediction message {message_id} for target {target_game}: {e}")
             return False
 
-        first_parentheses_content = matches[0]  # SEULEMENT le premier
-        logger.info(f"🔍 VÉRIFICATION PREMIER PARENTHÈSES SEULEMENT: {first_parentheses_content}")
+    # -------------------------
+    # Verification logic & status updates
+    # -------------------------
+    def check_costume_in_first_parentheses(self, message: str, predicted_costume: str) -> bool:
+        """Return True if the predicted costume exists in the FIRST parentheses group of the message."""
+        normalized = normalize_emoji(message)
+        matches = extract_parentheses_sections(normalized)
+        if not matches:
+            return False
+        first_content = matches[0]
+        # find suits in first_content
+        found = predicted_costume in re.findall(r'(?:♠️|♥️|♦️|♣️)', first_content)
+        logger.debug(f"Checking predicted '{predicted_costume}' in first parentheses '{first_content}' -> {found}")
+        return found
 
-        costume_found = normalized_costume in first_parentheses_content
-        logger.info(f"🔍 Recherche costume {normalized_costume} dans PREMIER parenthèses: {costume_found}")
-        return costume_found
+    def verify_prediction(self, message: str, bot=None) -> Optional[Dict]:
+        """
+        Verify incoming finalized message and update prediction statuses.
+        - message: full text of the incoming (finalized) Telegram message
+        - bot: optional telegram.Bot instance to perform edit_message_text calls
+        Returns the updated prediction record or None.
+        """
+        if not self.has_completion_indicators(message):
+            # We only verify on finalized messages (✅ or 🔰)
+        logger.debug("verify_prediction called on non-final message; skipping.")
+            return None
 
-    def _verify_prediction_common(self, message: str, is_edited: bool = False) -> Optional[Dict]:
-        """SYSTÈME DE VÉRIFICATION CORRIGÉ - Vérifie décalage +0, +1, puis ⭕ après +2"""
         game_number = self.extract_game_number(message)
-        if not game_number:
+        if game_number is None:
+            logger.debug("verify_prediction: no game number found")
             return None
 
-        logger.info(f"🔍 VÉRIFICATION CORRIGÉE - Jeu {game_number} (édité: {is_edited})")
+        # 1) If this game_number matches a stored prediction target (N+2)
+        if game_number in self.predictions:
+            rec = self.predictions[game_number]
+            predicted = rec['predicted_costume']
+            if self.check_costume_in_first_parentheses(message, predicted):
+                rec['status'] = "✅0️⃣"
+                rec['verified'] = True
+                rec['verification_game'] = game_number
+                rec['verified_at'] = time.time()
+                logger.info(f"Prediction target {game_number} -> ✅0️⃣")
+                # edit message in channel if we have bot & message_id
+                if bot:
+                    try:
+                        self.edit_prediction_message(bot, game_number)
+                    except Exception:
+                        pass
+            else:
+                # mark waiting for N+3
+                rec['status'] = "waiting_next"
+                logger.info(f"Prediction target {game_number} -> not found in N+2, status=waiting_next")
+            return rec
 
-        # SYSTÈME DE VÉRIFICATION: Sur messages édités OU normaux avec symbole succès
-        has_success_symbol = any(s in message for s in ('✅', '🔰'))  # <-- CORRECTION ICI
-        if not has_success_symbol:
-            logger.info(f"🔍 ⏸️ Pas de vérification - Aucun symbole de succès (✅/🔰) trouvé")
-            return None
-
-        logger.info(f"🔍 📊 ÉTAT ACTUEL - Prédictions stockées: {list(self.predictions.keys())}")
-        logger.info(f"🔍 📊 ÉTAT ACTUEL - Messages envoyés: {list(self.sent_predictions.keys())}")
-
-        # Si aucune prédiction stockée, pas de vérification possible
-        if not self.predictions:
-            logger.info(f"🔍 ✅ VÉRIFICATION TERMINÉE - Aucune prédiction éligible pour le jeu {game_number}")
-            return None
-
-        # VÉRIFICATION CORRIGÉE: DÉCALAGE +0, +1, PUIS ÉCHEC APRÈS +2
-        for predicted_game in sorted(self.predictions.keys()):
-            prediction = self.predictions[predicted_game]
-
-            # Vérifier seulement les prédictions en attente
-            if prediction.get('status') != 'pending':
-                logger.info(f"🔍 ⏭️ Prédiction {predicted_game} déjà traitée (statut: {prediction.get('status')})")
-                continue
-
-            verification_offset = game_number - predicted_game
-            logger.info(f"🔍 🎯 VÉRIFICATION - Prédiction {predicted_game} vs jeu actuel {game_number}, décalage: {verification_offset}")
-
-            # VÉRIFIER DÉCALAGE +0 ET +1 POUR SUCCÈS
-            if verification_offset == 0 or verification_offset == 1:
-                predicted_costume = prediction.get('predicted_costume')
-                if not predicted_costume:
-                    logger.info(f"🔍 ❌ Pas de costume prédit stocké pour le jeu {predicted_game}")
-                    continue
-
-                logger.info(f"🔍 ⚡ VÉRIFICATION DÉCALAGE +{verification_offset} - Jeu {game_number}: Recherche costume {predicted_costume}")
-
-                # Vérifier si le costume prédit apparaît dans le PREMIER parenthèses SEULEMENT
-                costume_found = self.check_costume_in_first_parentheses(message, predicted_costume)
-
-                if costume_found:
-                    # SUCCÈS à décalage +0 ou +1
-                    status_symbol = f"✅{verification_offset}️⃣"
-                    original_message = f"🔵{predicted_game}🔵:{predicted_costume}statut :⏳"
-                    updated_message = f"🔵{predicted_game}🔵:{predicted_costume}statut :{status_symbol}"
-
-                    # Marquer comme traité IMMÉDIATEMENT
-                    prediction['status'] = 'correct'
-                    prediction['verification_count'] = verification_offset
-                    prediction['final_message'] = updated_message
-
-                    logger.info(f"🔍 ⚡ SUCCÈS DÉCALAGE +{verification_offset} - Costume {predicted_costume} détecté")
-                    logger.info(f"🔍 🛑 ARRÊT IMMÉDIAT - Vérification terminée: {status_symbol}")
-                    logger.info(f"🔍 📝 ÉDITION MESSAGE - '{original_message}' → '{updated_message}'")
-
-                    return {
-                        'type': 'edit_message',
-                        'predicted_game': predicted_game,
-                        'new_message': updated_message,
-                        'original_message': original_message
-                    }
+        # 2) Otherwise, check if this message is N+3 for any prediction that was waiting
+        for target_game, rec in list(self.predictions.items()):
+            if rec.get('status') == "waiting_next" and (target_game + 1) == game_number:
+                predicted = rec['predicted_costume']
+                if self.check_costume_in_first_parentheses(message, predicted):
+                    rec['status'] = "✅1️⃣"
+                    rec['verified'] = True
+                    rec['verification_game'] = game_number
+                    rec['verified_at'] = time.time()
+                    logger.info(f"Prediction target {target_game} -> ✅1️⃣ (found in N+3={game_number})")
                 else:
-                    # ÉCHEC - Costume non trouvé au décalage +0 ou +1
-                    logger.info(f"🔍 ❌ ÉCHEC DÉCALAGE +{verification_offset} - Costume {predicted_costume} non trouvé")
-                    # Continuer à vérifier le prochain décalage (si applicable)
-                    continue
+                    rec['status'] = "⭕"
+                    rec['verified'] = True
+                    rec['verification_game'] = game_number
+                    rec['verified_at'] = time.time()
+                    logger.info(f"Prediction target {target_game} -> ⭕ (not found in N+3={game_number})")
+                # edit message if possible
+                if bot:
+                    try:
+                        self.edit_prediction_message(bot, target_game)
+                    except Exception:
+                        pass
+                return rec
 
-            # ÉCHEC APRÈS +2 (quand décalage >= 2)
-            elif verification_offset >= 2:
-                predicted_costume = prediction.get('predicted_costume', '')
-                original_message = f"🔵{predicted_game}🔵:{predicted_costume}statut :⏳"
-                updated_message = f"🔵{predicted_game}🔵:{predicted_costume}statut :⭕"
-
-                # Marquer comme échec APRÈS +2
-                prediction['status'] = 'failed'
-                prediction['final_message'] = updated_message
-
-                logger.info(f"🔍 ❌ ÉCHEC APRÈS +2 - Décalage {verification_offset} ≥ 2")
-                logger.info(f"🔍 🛑 ARRÊT ÉCHEC - Prédiction {predicted_game} marquée: ⭕")
-                return {
-                    'type': 'edit_message',
-                    'predicted_game': predicted_game,
-                    'new_message': updated_message,
-                    'original_message': original_message
-                }
-
-        logger.info(f"🔍 ✅ VÉRIFICATION TERMINÉE - Aucune prédiction éligible pour le jeu {game_number}")
+        # No prediction updated
+        logger.debug("verify_prediction: no prediction matched/updated for incoming final message.")
         return None
 
+    # -------------------------
+    # Convenience: process incoming telegram message (combined)
+    # -------------------------
+    def process_incoming_telegram_message(self, bot, chat_id: int, message_text: str) -> Dict:
+        """
+        Called by your webhook handler when a message arrives.
+        - bot: telegram.Bot instance (python-telegram-bot v20.x)
+        - chat_id: id of the chat where message arrived
+        - message_text: content of the message
 
-# Global instance
-card_predictor = CardPredictor()
+        Flow:
+        1) Attempt to create a prediction if message is final and mirror rule matches.
+           If a prediction is created, we call send_prediction_via_bot(...) to send to channel and
+           store message_id for later edits.
+        2) Attempt to verify/update any existing predictions using this finalized message.
+        Returns: dict { 'made_prediction': info or None, 'verified': record or None }
+        """
+        result = {'made_prediction': None, 'verified': None}
+
+        try:
+            # 1) Should we prepare a prediction?
+            should, base_game, predicted_costume = self.should_predict(message_text)
+            if should and base_game and predicted_costume:
+                # create record (without message_id yet)
+                text = self.make_prediction(base_game, predicted_costume, sent_message_id=None, sent_chat_id=PREDICTION_CHANNEL_ID)
+                # send to channel and store message_id
+                # note: make_prediction returns the textual message; the stored record has target_game key
+                target_game = base_game + 2
+                try:
+                    sent_message = bot.send_message(chat_id=PREDICTION_CHANNEL_ID, text=self.get_prediction_text(target_game))
+                    message_id = getattr(sent_message, 'message_id', None)
+                    # save message_id and chat_id
+                    if target_game in self.predictions:
+                        self.predictions[target_game]['message_id'] = message_id
+                        self.predictions[target_game]['chat_id'] = PREDICTION_CHANNEL_ID
+                    logger.info(f"Sent prediction message for target {target_game} message_id={message_id}")
+                    result['made_prediction'] = {'target_game': target_game, 'message_id': message_id, 'text': self.get_prediction_text(target_game)}
+                except Exception as e:
+                    logger.exception(f"Failed to send prediction message to channel {PREDICTION_CHANNEL_ID}: {e}")
+                    # leave record without message_id; still stored
+
+            # 2) Verification step (only finalized messages are considered inside verify_prediction)
+            verified_rec = self.verify_prediction(message_text, bot=bot)
+            if verified_rec:
+                result['verified'] = verified_rec
+
+        except Exception as e:
+            logger.exception(f"Error processing incoming message: {e}")
+
+        return result
+
+    # -------------------------
+    # Debug / show
+    # -------------------------
+    def show_predictions(self) -> str:
+        if not self.predictions:
+            return "No predictions."
+        lines = []
+        for tg in sorted(self.predictions.keys()):
+            rec = self.predictions[tg]
+            lines.append(f"Game {tg}: costume={rec.get('predicted_costume')} status={rec.get('status')} message_id={rec.get('message_id')} from={rec.get('predicted_from')}")
+        return "\n".join(lines)
+
+
+# -------------------------
+# Example usage (for local testing only)
+# -------------------------
+if __name__ == "__main__":
+    # This block is only for local/manual testing and should be removed or guarded in actual webhook use.
+    from telegram import Bot
+    # set token from env for local test (not required for deployment)
+    TOKEN = os.environ.get("TG_TOKEN", "")
+    if not TOKEN:
+        print("Set TG_TOKEN env var to run local test.")
+    else:
+        bot = Bot(TOKEN)
+        cp = CardPredictor()
+        # Example final message to create prediction:
+        m1 = "#N861. 0(4♥️Q♥️6♠️) - ✅3(2♣️A♣️Q♣️) #T3"
+        print("Processing incoming:", m1)
+        out = cp.process_incoming_telegram_message(bot, TARGET_CHANNEL_ID, m1)
+        print("Result:", out)
+        print("Current predictions:\n", cp.show_predictions())
+
+        # Example of N+2 arriving
+        m2 = "#N863 (7♥️5♣️3♠️) - ✅"
+        print("Processing incoming:", m2)
+        out2 = cp.process_incoming_telegram_message(bot, TARGET_CHANNEL_ID, m2)
+        print("Result:", out2)
+        print("Current predictions:\n", cp.show_predictions())
+  
