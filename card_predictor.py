@@ -327,7 +327,7 @@ class CardPredictor:
             return False, None, None
 
         # Skip if we already have a prediction for target game number (+1)
-        target_game = game_number + 1
+        target_game = game_number + 2
         if target_game in self.predictions and self.predictions[target_game].get('status') == 'pending':
             logger.info(f"🔮 Jeu {game_number}: Prédiction N{target_game} déjà existante, éviter doublon")
             return False, None, None
