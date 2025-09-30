@@ -5,6 +5,7 @@ Enhanced with message verification and status update system
 
 import logging
 import os
+import requests
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, Any
@@ -235,7 +236,7 @@ class TelegramHandlers:
                         target_channel = self.get_redirect_channel(sender_chat_id)
                         sent_message_info = self.send_message(target_channel, prediction)
                         if sent_message_info and isinstance(sent_message_info, dict) and 'message_id' in sent_message_info:
-                            target_game = game_number + 2  # ⬅️ N+2 au lieu de N+1
+                            target_game = game_number + 2  # ⬅️ N+2
                             self.card_predictor.sent_predictions[target_game] = {
                                 'chat_id': target_channel,
                                 'message_id': sent_message_info['message_id']
@@ -461,29 +462,7 @@ class TelegramHandlers:
                     f"🕒 Délai actuel: {current_cooldown} secondes\n\n"
                     f"💡 Usage: `/cooldown [secondes]`"
                 )
-                return
-
-            if len(parts) != 2:
-                self.send_message(chat_id, "❌ Format incorrect ! Usage: `/cooldown [secondes]`")
-                return
-
-            try:
-                seconds = int(parts[1])
-                if seconds < 30 or seconds > 600:
-                    self.send_message(chat_id, "❌ Délai invalide ! Entre 30 et 600 secondes.")
-                    return
-            except ValueError:
-                self.send_message(chat_id, "❌ Veuillez entrer un nombre valide.")
-                return
-
-            if self.card_predictor:
-                old_cooldown = self.card_predictor.prediction_cooldown
-                self.card_predictor.prediction_cooldown = seconds
-                self.send_message(chat_id,
-                    f"✅ **COOLDOWN DEPLOY299999 MIS À JOUR !**\n\n"
-                    f"🕒 Ancien: {old_cooldown}s → Nouveau: {seconds}s"
-                )
-            else:
+              else:
                 self.send_message(chat_id, "❌ Système de prédiction non disponible.")
 
         except Exception as e:
@@ -670,7 +649,7 @@ class TelegramHandlers:
                 'parse_mode': 'HTML'
             }
             response = requests.post(url, json=data, timeout=10)
-result = response.json()
+            result = response.json()
             if result.get('ok'):
                 logger.info(f"✅ DEPLOY299999 - Message édité avec succès dans chat {chat_id}")
                 return True
@@ -680,4 +659,5 @@ result = response.json()
         except Exception as e:
             logger.error(f"❌ Error editing message: {e}")
             return False
-        
+
+         
