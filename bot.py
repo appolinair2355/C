@@ -7,7 +7,7 @@ import requests
 import json
 from typing import Dict, Any
 from handlers import TelegramHandlers
-from card_predictor import CardPredictor  # 🔧 CORRIGÉ : import de la classe
+from card_predictor import card_predictor
 
 logger = logging.getLogger(__name__)
 
@@ -16,16 +16,13 @@ class TelegramBot:
         self.token = token
         self.base_url = f"https://api.telegram.org/bot{token}"
         self.deployment_file_path = "deployment_package_complete.zip"
-        
-        # 🔧 CORRIGÉ : instanciation correcte
-        self.card_predictor = CardPredictor()
-        
         # Initialize advanced handlers
         self.handlers = TelegramHandlers(token)
 
     def handle_update(self, update: Dict[str, Any]) -> None:
         """Handle incoming Telegram update with advanced features for webhook mode"""
         try:
+            # Log avec type de message
             if 'message' in update:
                 logger.info(f"🔄 Bot traite message normal via webhook")
             elif 'edited_message' in update:
@@ -52,18 +49,18 @@ class TelegramBot:
             if chat_type in ['group', 'supergroup', 'channel'] and 'text' in message:
                 text = message['text']
 
-                # 🔧 CORRIGÉ : utilisation de l’instance
-                should_predict, game_number, combination = self.card_predictor.should_predict(text)
+                # Check if we should make a prediction
+                should_predict, game_number, combination = card_predictor.should_predict(text)
 
                 if should_predict and game_number is not None and combination is not None:
-                    prediction = self.card_predictor.make_prediction(game_number, combination)
+                    prediction = card_predictor.make_prediction(game_number, combination)
                     logger.info(f"Making prediction: {prediction}")
 
                     # Send prediction to the chat
                     self.send_message(chat_id, prediction)
 
-                # 🔧 CORRIGÉ : utilisation de l’instance
-                verification_result = self.card_predictor.verify_prediction(text)
+                # Check if this message verifies a previous prediction
+                verification_result = card_predictor.verify_prediction(text)
                 if verification_result:
                     logger.info(f"Verification result: {verification_result}")
 
@@ -222,4 +219,3 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Error getting bot info: {e}")
             return {}
-    
