@@ -455,145 +455,7 @@ class TelegramHandlers:
                 return
 
             parts = text.strip().split()
-            if len(parts) == 1:
-                current_cooldown = self.card_predictor.prediction_cooldown if self.card_predictor else 30
-                self.send_message(chat_id,
-                    f"⏰ **COOLDOWN DEPLOY299999**\n\n"
-                    f"🕒 Délai actuel: {current_cooldown} secondes\n\n"
-                    f"💡 Usage: `/cooldown [secondes]`"
-                )
-              else:
-                self.send_message(chat_id, "❌ Système de prédiction non disponible.")
-
-        except Exception as e:
-            logger.error(f"Error handling cooldown command: {e}")
-
-    def _handle_announce_command(self, chat_id: int, text: str, user_id: int = None) -> None:
-        try:
-            if user_id and not self._is_authorized_user(user_id):
-                self.send_message(chat_id, "🚫 Vous n'êtes pas autorisé à utiliser ce bot.")
-                return
-
-            parts = text.strip().split(maxsplit=1)
-            if len(parts) == 1:
-                self.send_message(chat_id, "📢 Usage: `/announce [votre message]`")
-                return
-
-            announcement_text = parts[1]
-            target_channel = self.get_redirect_channel(-1002682552255)
-
-            formatted_message = f"📢 **ANNONCE DEPLOY299999** 📢\n\n{announcement_text}\n\n🤖 _Bot de prédiction DEPLOY299999 optimisé render.com_"
-
-            sent_message_info = self.send_message(target_channel, formatted_message)
-            if sent_message_info:
-                self.send_message(chat_id, f"✅ **ANNONCE DEPLOY299999 ENVOYÉE !**")
-            else:
-                self.send_message(chat_id, "❌ Erreur lors de l'envoi de l'annonce.")
-
-        except Exception as e:
-            logger.error(f"Error handling announce command: {e}")
-
-    def _handle_redirect_command(self, chat_id: int, text: str, user_id: int = None) -> None:
-        try:
-            if user_id and not self._is_authorized_user(user_id):
-                self.send_message(chat_id, "🚫 Vous n'êtes pas autorisé à utiliser ce bot.")
-                return
-
-            parts = text.strip().split()
-            if len(parts) == 1:
-                self.send_message(chat_id, "📍 Usage: `/redirect [source_id] [target_id]`")
-                return
-
-            if parts[1] == "clear":
-                if self.card_predictor:
-                    self.card_predictor.redirect_channels.clear()
-                    self.send_message(chat_id, "✅ Redirections DEPLOY299999 supprimées !")
-                return
-
-            if len(parts) != 3:
-                self.send_message(chat_id, "❌ Format incorrect ! Usage: `/redirect [source_id] [target_id]`")
-                return
-
-            try:
-                source_id = int(parts[1].strip())
-                target_id = int(parts[2].strip())
-            except ValueError:
-                self.send_message(chat_id, "❌ Les IDs doivent être des nombres.")
-                return
-
-            if self.card_predictor:
-                self.card_predictor.set_redirect_channel(source_id, target_id)
-                self.send_message(chat_id,
-                    f"✅ **REDIRECTION DEPLOY299999 CONFIGURÉE !**\n\n"
-                    f"📍 {source_id} → {target_id}"
-                )
-            else:
-                self.send_message(chat_id, "❌ Système de prédiction non disponible.")
-
-        except Exception as e:
-            logger.error(f"Error handling redirect command: {e}")
-
-    def _handle_regular_message(self, message: Dict[str, Any]) -> None:
-        """Handle regular text messages"""
-        try:
-            chat_id = message['chat']['id']
-            chat_type = message['chat'].get('type', 'private')
-
-            if chat_type == 'private':
-                self.send_message(chat_id,
-                    "🎭 Salut ! Je suis le bot DEPLOY299999.\n"
-                    "Utilisez /help pour voir mes commandes.\n\n"
-                    "Optimisé pour render.com avec prédictions automatiques ! 🎯"
-                )
-
-        except Exception as e:
-            logger.error(f"Error handling regular message: {e}")
-
-    def _handle_new_chat_members(self, message: Dict[str, Any]) -> None:
-        """Handle when bot is added to a channel"""
-        try:
-            chat_id = message['chat']['id']
-            for member in message['new_chat_members']:
-                if member.get('is_bot', False):
-                    self.send_message(chat_id, GREETING_MESSAGE)
-                    break
-        except Exception as e:
-            logger.error(f"Error handling new chat members: {e}")
-
-    def _handle_redi_command(self, chat_id: int, sender_chat_id: int, user_id: int = None) -> None:
-        """Handle /redi command"""
-        try:
-            if user_id and not self._is_authorized_user(user_id):
-                self.send_message(chat_id, "🚫 Vous n'êtes pas autorisé à utiliser ce bot.")
-                return
-            self.redirected_channels[sender_chat_id] = chat_id
-            self.send_message(chat_id, "✅ Redirection DEPLOY299999 configurée vers ce chat.")
-        except Exception as e:
-            logger.error(f"Error handling redi command: {e}")
-
-    def _handle_reset_command(self, sender_chat_id: int, user_id: int = None) -> None:
-        """Handle /reset command"""
-        try:
-            if user_id and not self._is_authorized_user(user_id):
-                return
-            if self.card_predictor:
-                self.card_predictor.sent_predictions = {}
-                self.send_message(sender_chat_id, "✅ Prédictions DEPLOY299999 réinitialisées.")
-        except Exception as e:
-            logger.error(f"Error handling reset command: {e}")
-
-    # ------------------------------------------------------------------
-    #  UTILITAIRES  (send_message, send_document, edit_message)
-    # ------------------------------------------------------------------
-    def get_redirect_channel(self, source_chat_id: int) -> int:
-        """Get redirect channel, defaults to PREDICTION_CHANNEL_ID"""
-        if self.card_predictor and hasattr(self.card_predictor, 'redirect_channels'):
-            redirect_target = self.card_predictor.redirect_channels.get(source_chat_id)
-            if redirect_target:
-                return redirect_target
-        local_redirect = self.redirected_channels.get(source_chat_id)
-        if local_redirect:
-            return local_redirect
+                        return local_redirect
         return PREDICTION_CHANNEL_ID
 
     def send_message(self, chat_id: int, text: str) -> Any:
@@ -659,5 +521,37 @@ class TelegramHandlers:
         except Exception as e:
             logger.error(f"❌ Error editing message: {e}")
             return False
+              if len(parts) == 1:
+                current_cooldown = self.card_predictor.prediction_cooldown if self.card_predictor else 30
+                self.send_message(chat_id,
+                    f"⏰ **COOLDOWN DEPLOY299999**\n\n"
+                    f"🕒 Délai actuel: {current_cooldown} secondes\n\n"
+                    f"💡 Usage: `/cooldown [secondes]`"
+                )
+                return                       # ← retour à la colonne 0 (ok)
 
+            # ---------- NOUVEAU BLOC CORRECT ----------
+            if len(parts) != 2:
+                self.send_message(chat_id, "❌ Format incorrect ! Usage: `/cooldown [secondes]`")
+                return
+
+            try:
+                seconds = int(parts[1])
+                if seconds < 30 or seconds > 600:
+                    self.send_message(chat_id, "❌ Délai invalide ! Entre 30 et 600 secondes.")
+                    return
+            except ValueError:
+                self.send_message(chat_id, "❌ Veuillez entrer un nombre valide.")
+                return
+
+            if self.card_predictor:
+                old_cooldown = self.card_predictor.prediction_cooldown
+                self.card_predictor.prediction_cooldown = seconds
+                self.send_message(chat_id,
+                    f"✅ **COOLDOWN DEPLOY299999 MIS À JOUR !**\n\n"
+                    f"🕒 Ancien: {old_cooldown}s → Nouveau: {seconds}s"
+                )
+            else:
+                self.send_message(chat_id, "❌ Système de prédiction non disponible.")
+              
          
